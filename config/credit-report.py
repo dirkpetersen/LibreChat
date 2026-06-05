@@ -3,13 +3,18 @@
 Monthly credit consumption report for LibreChat.
 
 Usage:
-    python config/credit-report.py                  # last 12 months, all users
-    python config/credit-report.py --months 6       # last 6 months
-    python config/credit-report.py --user <email>   # single user
-    python config/credit-report.py --by-model       # break down by model
-    python config/credit-report.py --by-user        # break down by user
+    python config/credit-report.py                                    # last 12 months, all users
+    python config/credit-report.py --months 6                         # last 6 months
+    python config/credit-report.py --user <email>                     # single user
+    python config/credit-report.py --by-model                         # break down by model
+    python config/credit-report.py --by-user                          # break down by user
+    python config/credit-report.py --mongo-uri mongodb://host:27017/LibreChat  # override URI
 
 Reads MONGO_URI from environment or .env file in the repo root.
+For Docker installs MongoDB is not exposed on localhost by default. Either:
+  - Pass --mongo-uri mongodb://127.0.0.1:27017/LibreChat  (after exposing the port)
+  - Or add  ports: ["27017:27017"]  to the mongodb service in docker-compose.override.yml
+
 Requires: pip install pymongo python-dotenv
 """
 
@@ -38,19 +43,32 @@ def credits_to_usd(credits: float) -> str:
     return f"${abs(credits) / CREDITS_PER_USD:.4f}"
 
 
-def load_mongo_uri() -> str:
+def load_mongo_uri(override: str | None = None) -> str:
+    if override:
+        return override
     load_dotenv(REPO_ROOT / ".env")
     uri = os.environ.get("MONGO_URI")
     if not uri:
-        print("MONGO_URI not set. Add it to .env or export it as an env var.")
+        print("MONGO_URI not set. Add it to .env, export it as an env var, or pass --mongo-uri.")
         sys.exit(1)
     return uri
 
 
 def get_db(uri: str):
-    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-    db_name = uri.rstrip("/").split("/")[-1].split("?")[0] or "LibreChat"
-    return client[db_name]
+    try:
+        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        db_name = uri.rstrip("/").split("/")[-1].split("?")[0] or "LibreChat"
+        db = client[db_name]
+        db.command("ping")  # fail fast with a clear error
+        return db
+    except Exception as exc:
+        print(f"Could not connect to MongoDB at:  {uri}")
+        print(f"Error: {exc}")
+        print()
+        print("If MongoDB is running in Docker and not exposed, either:")
+        print("  1. Pass --mongo-uri with the correct host/port")
+        print("  2. Add  ports: ['27017:27017']  to the mongodb service in docker-compose.override.yml")
+        sys.exit(1)
 
 
 def month_label(year: int, month: int) -> str:
@@ -215,13 +233,14 @@ def print_by_user(rows: list, db) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LibreChat monthly credit consumption report")
-    parser.add_argument("--months",   type=int, default=12,  help="How many months back to include (default: 12)")
-    parser.add_argument("--user",     type=str, default=None, help="Filter to a single user email")
-    parser.add_argument("--by-model", action="store_true",   help="Break down by model within each month")
-    parser.add_argument("--by-user",  action="store_true",   help="Break down by user within each month")
+    parser.add_argument("--months",    type=int, default=12,  help="How many months back to include (default: 12)")
+    parser.add_argument("--user",      type=str, default=None, help="Filter to a single user email")
+    parser.add_argument("--by-model",  action="store_true",   help="Break down by model within each month")
+    parser.add_argument("--by-user",   action="store_true",   help="Break down by user within each month")
+    parser.add_argument("--mongo-uri", type=str, default=None, help="Override MongoDB URI (default: read from .env)")
     args = parser.parse_args()
 
-    uri = load_mongo_uri()
+    uri = load_mongo_uri(args.mongo_uri)
     db = get_db(uri)
 
     user_id = None
